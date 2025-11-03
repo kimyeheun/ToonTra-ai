@@ -1,0 +1,83 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Manual ROI Picker</title>
+  <style>
+    body { font-family: system-ui; margin: 24px; }
+    #c { border: 1px solid #aaa; }
+    .row { display: flex; gap: 16px; align-items: center; }
+  </style>
+</head>
+<body>
+  <h2>Draw boxes on the image</h2>
+  <div class="row">
+    <input type="file" id="file" accept="image/*">
+    <button id="send">Send to OCR</button>
+  </div>
+  <br/>
+  <canvas id="c"></canvas>
+  <pre id="out"></pre>
+  <script>
+    const fileInput = document.getElementById('file');
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const boxes = [];
+    let img = new Image();
+    let drawing = false, sx=0, sy=0;
+
+    fileInput.onchange = e => {
+      const f = e.target.files[0];
+      if (!f) return;
+      const url = URL.createObjectURL(f);
+      img.onload = () => {
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+      };
+      img.src = url;
+    };
+
+    canvas.onmousedown = e => {
+      drawing = true;
+      const r = canvas.getBoundingClientRect();
+      sx = e.clientX - r.left; sy = e.clientY - r.top;
+    };
+    canvas.onmousemove = e => {
+      if (!drawing) return;
+      const r = canvas.getBoundingClientRect();
+      const cx = e.clientX - r.left, cy = e.clientY - r.top;
+      ctx.drawImage(img, 0, 0);
+      const w = cx - sx, h = cy - sy;
+      ctx.strokeStyle = '#ff8800';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(sx, sy, w, h);
+    };
+    canvas.onmouseup = e => {
+      if (!drawing) return;
+      drawing = false;
+      const r = canvas.getBoundingClientRect();
+      const ex = e.clientX - r.left, ey = e.clientY - r.top;
+      const x = Math.round(Math.min(sx, ex));
+      const y = Math.round(Math.min(sy, ey));
+      const w = Math.round(Math.abs(ex - sx));
+      const h = Math.round(Math.abs(ey - sy));
+      if (w > 1 && h > 1) boxes.push({x,y,w,h});
+      ctx.drawImage(img, 0, 0);
+      ctx.strokeStyle = '#ff8800'; ctx.lineWidth = 2;
+      boxes.forEach((b,i)=>{ ctx.strokeRect(b.x,b.y,b.w,b.h); ctx.fillText(String(i+1), b.x+4, b.y+12); });
+    };
+
+    document.getElementById('send').onclick = async () => {
+      const f = fileInput.files[0];
+      if (!f || boxes.length===0) { alert('Select image and draw boxes'); return; }
+      const fd = new FormData();
+      fd.append('img', f);
+      fd.append('boxes_json', JSON.stringify(boxes));
+      const res = await fetch('/api/ocr', { method:'POST', body: fd });
+      const js = await res.json();
+      document.getElementById('out').textContent = JSON.stringify(js, null, 2);
+    };
+  </script>
+</body>
+</html>

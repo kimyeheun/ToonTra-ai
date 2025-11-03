@@ -1,0 +1,45 @@
+# AI 번역 시스템 설정 파일 예제
+# 실제 사용 시 config.ini로 복사하고 각 값들을 실제 값으로 변경하세요
+
+[TEXTDETECTOR]
+weights_dir = Toontra_new/weights/
+
+[TEXTRECOGNIZER]
+saved_model = Toontra_new/weights/text_recognizer.pth
+batch_max_length = 25
+imgH = 32
+imgW = 100
+PAD = False
+rgb = False
+Transformation = TPS
+FeatureExtraction = ResNet
+SequenceModeling = BiLSTM
+Prediction = CTC
+num_fiducial = 20
+input_channel = 1
+output_channel = 512
+hidden_size = 256
+batch_size = 192
+
+[TEXTTRANSLATOR]
+# Papago API 설정 (네이버 클라우드 플랫폼에서 발급)
+papago_client_id = YOUR_PAPAGO_CLIENT_ID
+papago_client_secret = YOUR_PAPAGO_CLIENT_SECRET
+papago_url = https://papago.apigw.ntruss.com/nmt/v1/translation
+
+# Google Cloud Translation API 설정
+google_credentials = Toontra_new/config/YOUR_GOOGLE_CREDENTIALS.json
+
+# DeepL API 설정
+deepl_auth_key = YOUR_DEEPL_AUTH_KEY:fx
+
+# OpenAI API 설정
+openai_api_key = YOUR_OPENAI_API_KEY
+
+[IMAGEINPAINTER]
+weights = Toontra_new/weights/big-lama.pt
+
+[Toontra_new]
+cuda = True
+gpu_id = 0
+log_dir = Toontra_new/log/
