@@ -283,7 +283,6 @@ def download_from_url(
 
     # Get download tenth url
     url = get_download_url(n_model, key=key, lang=lang)
-
     logging.info("Downloading user-selected model...")
     wget.download(url, type_dir)
     sys.stderr.write("\n")

@@ -1,23 +1,29 @@
-import ocr_service.easyocr as easyocr_korean
-from ocr_service.utils.util import array1d_to_array2d, array2d_to_array1d, cv2pil
-import cv2
-import numpy as np
-from shapely.geometry import Polygon, MultiPoint
 import functools
-from typing import List, Set
-import networkx as nx
-from collections import Counter
 import itertools
 import logging
+from collections import Counter
+from typing import List, Set
+
+import cv2
+import networkx as nx
+import numpy as np
+import torch
+from paddleocr import TextDetection
+from shapely.geometry import Polygon, MultiPoint
+
+import ocr_service.easyocr as easyocr_korean
+from ocr_service.config.pororo_parameter import basic
+from ocr_service.pororo.brainocr import Reader as PororoReader
+from ocr_service.pororo.tasks.utils.download_utils import download_or_load
+from ocr_service.utils.util import cv2pil
 
 logger = logging.getLogger(__name__)
 
 
 try:
     functools.cached_property
-except AttributeError:  # Supports Python versions below 3.8
+except AttributeError:
     from backports.cached_property import cached_property
-
     functools.cached_property = cached_property
 
 
@@ -29,51 +35,101 @@ class TextDetector:
             model_storage_directory=self.opt.TextDetector_weights_dir,
             download_enabled=True,
         )
+        self.model_type = model_type
+        self.model = self._load_model(model_type)
+        logger.info(f"TextDetector initialized with model_type: {self.model_type}")
 
-    def detect_text(self, img_path):
+    def _load_model(self, model_type: str):
+        if model_type == "easyocr":
+            try:
+                use_cuda = self.opt.cuda if self.opt else torch.cuda.is_available()
+                weights_dir = self.opt.TextDetector_weights_dir
+                model_instance = easyocr_korean.easyocr.CRAFT(
+                    gpu=use_cuda,
+                    model_storage_directory=weights_dir,
+                    download_enabled=True,
+                )
+                logger.info(f"Loaded easyocr.CRAFT detector (GPU: {use_cuda})")
+                return model_instance
+            except Exception as e:
+                logger.error(f"Failed to load easyocr.CRAFT detector: {e}")
+                return None
+
+        elif model_type == "paddle":
+            try:
+                detector = TextDetection(model_dir="/home/ubuntu/.paddlex/official_models/PP-OCRv5_server_det") # model_dir="/mnt/c/SSAFY/ocr_pjt/ocr_service/ocr_det"
+                logger.info("PaddleOCR detector loaded successfully.")
+                return detector
+            except Exception as e:
+                logger.error(f"Failed to load PaddleOCR detector: {e}")
+                return None
+
+        elif model_type == "pororo":
+            try:
+                lang = "ko"
+                device = (self.opt.device if self.opt else
+                          ("cuda" if torch.cuda.is_available() else "cpu"))
+
+                det_model_path = download_or_load(f"misc/craft.pt", lang)
+                rec_model_path = download_or_load(f"misc/brainocr.pt", lang)
+                opt_fp = download_or_load(f"misc/ocr-opt.txt", lang)
+
+                reader = PororoReader(
+                    lang,
+                    det_model_ckpt_fp=det_model_path,
+                    rec_model_ckpt_fp=rec_model_path,
+                    opt_fp=opt_fp,
+                    device=device,
+                )
+                reader.detector.to(device)
+                reader.opt2val.update(basic)
+
+                logger.info("Pororo OCR detector loaded successfully.")
+                return reader
+            except Exception as e:
+                logger.error(f"Failed to load Pororo OCR detector: {e}")
+                return None
+
+        else:
+            raise ValueError(f"Unknown model_type: {model_type}")
+
+    def detect_text(self, image):
         """
         Returns:
             clustered: 텍스트라인 좌표 모음
             list_of_PIL_images_textlines: 텍스트라인 이미지 모음
             img: np.ndarray 원본이미지
         """
-        logger.debug(f"img_path: {img_path}")
-        cuts, h, w, img = self.cut_image_for_text_detection(img_path)
-        logger.debug(f"cuts: {cuts}")
-        logger.debug(f"h: {h}")
-        logger.debug(f"w: {w}")
-        logger.debug(f"img: {img}")
-        # CHECK THE OPTIMAL BATCH SIZE
-        [batch_horizontal_list, batch_free_list] = self.model.detect_text_region(
-            image_list=cuts, text_detection_resize=1024, text_detection_batch_size=1
-        )
+        cuts, h, w, img = self.cut_image_for_text_detection(image)
+        logger.debug(f"cuts, h, w, img: {cuts}, {h}, {w}, {img}")
+
+        batch_horizontal_list = []
+        if self.model_type == "easyocr":
+            [batch_horizontal_list, batch_free_list] = self.model.detect_text_region(
+                image_list=cuts, text_detection_resize=1024, text_detection_batch_size=1
+            )
+        elif self.model_type == "paddle":
+            batch_horizontal_list = self.run_detection_paddle(cuts)
+            batch_horizontal_list = [batch_horizontal_list]
+        elif self.model_type == "pororo":
+            batch_horizontal_list = self.run_detection_pororo(cuts)
         logger.debug(f"batch_horizontal_list: {batch_horizontal_list}")
+
         valid_batch_horizontal_list = self.check_if_valid_detection(
-            batch_horizontal_list, h, w
-        )
+            batch_horizontal_list, h, w)
         new_batch_horizontal_list = self.remove_overlap(
-            valid_batch_horizontal_list, h, w
-        )
+            valid_batch_horizontal_list, h, w)
         new_cord = self.convert_cut_coordinates_to_full_image(
-            new_batch_horizontal_list, h, w
-        )
+            new_batch_horizontal_list, h, w)
         sorted_coordinates = self.sort_lines(new_cord)
         clustered = self.cluster_coordinates(sorted_coordinates, h, w)
         logger.debug(f"clustered: {clustered}")
+
         list_of_PIL_images_textlines = []
         for cl in clustered:
             cluster_pil = []
             for c in cl:
                 x1, x2, y1, y2 = c
-                # # Clamp to image bounds
-                # x1 = max(0, min(x1, w))
-                # x2 = max(0, min(x2, w))
-                # y1 = max(0, min(y1, h))
-                # y2 = max(0, min(y2, h))
-                # # Skip invalid or empty regions
-                # if x2 <= x1 or y2 <= y1:
-                #     logger.debug(f"Skipping invalid ROI: {(x1, x2, y1, y2)}")
-                #     continue
                 part = img[y1:y2, x1:x2]
 
                 if (
@@ -90,26 +146,31 @@ class TextDetector:
         logger.debug(f"list_of_PIL_images_textlines: {list_of_PIL_images_textlines}")
         return clustered, list_of_PIL_images_textlines, img
 
+    def run_detection_paddle(self, cuts) -> List[List]:
+        # [x1, x2, y1, y2]
+        outputs = self.model.predict_iter(cuts) # NOTE: batch_size = 설정 가능
+        boxes = []
+
+        for result in outputs:
+            cluster = result.get('dt_polys', [])
+            for box in cluster:
+                for i in range(0, len(box), 2):
+                    start = box[i]
+                    end = box[i + 1]
+                    boxes.append([start[0], start[1], end[0], end[1]])
+        return boxes
+
+    def run_detection_pororo(self, cuts) -> List[List]:
+        results = []
+        for img in cuts:
+            horizontal_list, free_list = self.model.detect(img, self.model.opt2val)
+            results.append(horizontal_list)
+        return results
+
     def cluster_coordinates(self, coordinates, img_height, img_width):
         """
-        Returns:
-            clustered: list[list[list[int]]] = [
-            # 첫 번째 클러스터 (하나의 텍스트 블록)
-            [
-                [x1, x2, y1, y2],  # 첫 번째 텍스트 라인
-                [x1, x2, y1, y2],  # 두 번째 텍스트 라인
-                [x1, x2, y1, y2],  # 세 번째 텍스트 라인
-            ],
-            # 두 번째 클러스터 (또 다른 텍스트 블록)
-            [
-                [x1, x2, y1, y2],  # 첫 번째 텍스트 라인
-            ],
-            # 세 번째 클러스터
-            [
-                [x1, x2, y1, y2],  # 첫 번째 텍스트 라인
-                [x1, x2, y1, y2],  # 두 번째 텍스트 라인
-            ]
-        ]
+        Returns:        클러스터 | 박스 | (x, x, y, y)
+            clustered: list[list[list[int]]]
         """
         polys = []
         for pts in coordinates:
@@ -142,12 +203,13 @@ class TextDetector:
         _coordinates = []
         if len(cut_coordinates) == 1:
             return cut_coordinates[0]
+
         for idx, images in enumerate(cut_coordinates):
             for line in images:
                 x1, x2, y1, y2 = line
                 if idx == len(cut_coordinates) - 1:
-                    y1 = y1 + (img_height - img_width - 1)
-                    y2 = y2 + (img_height - img_width - 1)
+                    y1 = y1 + (img_height - img_width)
+                    y2 = y2 + (img_height - img_width)
                 else:
                     y1 = y1 + idx * (img_width // 2)
                     y2 = y2 + idx * (img_width // 2)
@@ -222,10 +284,7 @@ class TextDetector:
                     if ratio < 0.75:
                         valid_cut.append(line)
                 elif idx == (len(coordinates) - 1):
-                    overlap = (
-                        (height - width // 4)
-                        - ((height - width) // (width // 2) * (width // 2))
-                    ) / width
+                    overlap = ((height - width // 4) - ((height - width) // (width // 2) * (width // 2))) / width
                     if ratio >= overlap:
                         valid_cut.append(line)
                 else:
@@ -234,11 +293,9 @@ class TextDetector:
             valid_coordinates.append(valid_cut)
         return valid_coordinates
 
-    def cut_image_for_text_detection(self, img_path):
-        assert str.lower(img_path).endswith(".png") or str.lower(img_path).endswith(
-            ".jpg"
-        ), "The format {} is not supported.".format(img_path.split(".")[-1])
-        img = cv2.imread(img_path)
+    # NOTE: 세로로 긴 이미지(웹툰)을 적정 높이로 잘라서 반환.
+    #       겹치는 부분이 있게 자르므로 경계에서의 신뢰도 하락을 막음
+    def cut_image_for_text_detection(self, img):
         h, w = img.shape[:2]
         if w > h:
             return [img], h, w, img
@@ -307,7 +364,6 @@ class BBox(object):
 def distance_point_point(a: np.ndarray, b: np.ndarray) -> float:
     return np.linalg.norm(a - b)
 
-
 def distance_point_lineseg(p: np.ndarray, p1: np.ndarray, p2: np.ndarray):
     x = p[0]
     y = p[1]
@@ -340,14 +396,12 @@ def distance_point_lineseg(p: np.ndarray, p1: np.ndarray, p2: np.ndarray):
     dy = y - yy
     return np.sqrt(dx * dx + dy * dy)
 
-
 def sort_pnts(pts: np.ndarray):
     """
     Direction must be provided for sorting.
     The longer structure vector (mean of long side vectors) of input points is used to determine the direction.
     It is reliable enough for text lines but not for blocks.
     """
-
     if isinstance(pts, List):
         pts = np.array(pts)
     assert isinstance(pts, np.ndarray) and pts.shape == (4, 2)
@@ -780,7 +834,6 @@ def merge_bboxes_text_region(bboxes: List[Quadrilateral], width, height):
         # yield overall bbox and sorted indices
         yield txtlns, (fg_r, fg_g, fg_b), (bg_r, bg_g, bg_b)
 
-
 def quadrilateral_can_merge_region(
     a,
     b,
@@ -864,11 +917,6 @@ def split_text_region(
         fs1 = bboxes[connected_region_indices[0]].font_size
         fs2 = bboxes[connected_region_indices[1]].font_size
         fs = max(fs1, fs2)
-
-        # print(bboxes[connected_region_indices[0]].pts, bboxes[connected_region_indices[1]].pts)
-        # print(fs, bboxes[connected_region_indices[0]].distance(bboxes[connected_region_indices[1]]), (1 + gamma) * fs)
-        # print(bboxes[connected_region_indices[0]].angle, bboxes[connected_region_indices[1]].angle, 4 * np.pi / 180)
-
         if (
             bboxes[connected_region_indices[0]].distance(
                 bboxes[connected_region_indices[1]]
@@ -907,13 +955,6 @@ def split_text_region(
     max_centroid_alignment = min(
         abs(b1.centroid[0] - b2.centroid[0]), abs(b1.centroid[1] - b2.centroid[1])
     )
-
-    # print(edges)
-    # print(f'std: {distances_std} < thrshold: {std_threshold}, mean: {distances_mean}')
-    # print(f'{distances_sorted[0]} <= {distances_mean + distances_std * sigma}' \
-    #         f' or {distances_sorted[0]} <= {fontsize * (1 + gamma)}' \
-    #         f' or {distances_sorted[0] - distances_sorted[1]} < {distances_std * sigma}')
-
     if (
         distances_sorted[0] <= distances_mean + distances_std * sigma
         or distances_sorted[0] <= fontsize * (1 + gamma)
@@ -924,8 +965,6 @@ def split_text_region(
     ):
         return [set(connected_region_indices)]
     else:
-        # (split_u, split_v, _) = edges[0]
-        # print(f'split between "{bboxes[split_u].pts}", "{bboxes[split_v].pts}"')
         G = nx.Graph()
         for idx in connected_region_indices:
             G.add_node(idx)

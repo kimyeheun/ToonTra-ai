@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from modules.easyocr.model.modules import vgg16_bn, init_weights
+from ocr_service.easyocr.model.modules import vgg16_bn, init_weights
 
 
 class double_conv(nn.Module):

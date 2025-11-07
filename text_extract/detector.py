@@ -115,8 +115,6 @@ def detect_paddle(img_bgr: np.ndarray) -> List[Box]:
     detector = get_paddle_detector()
     if detector is None:
         raise ImportError("PaddleOCR detector model is not loaded.")
-
-    # det=True, rec=False로 실행 (det() 메소드 사용)
     result = detector.predict(img_bgr)
     if not result:
         return []

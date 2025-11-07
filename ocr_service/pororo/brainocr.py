@@ -72,7 +72,6 @@ class Reader(object):
                     opt2val[opt] = ast.literal_eval(val)
                 except:
                     opt2val[opt] = val
-
         return opt2val
 
     @staticmethod

@@ -1,77 +1,129 @@
-import sys
 import os
+import time
+from typing import List
+
+import cv2
+import numpy as np
 import torch
-import pprint
 
-sys.path.append(os.path.abspath("."))
-
-# --- 1. 핵심 모듈 임포트 ---
-from pororo.tasks.optical_character_recognition import PororoOCR
+from ocr_service.config.pororo_parameter import basic
 from pororo import brainocr
 from pororo.tasks.utils.download_utils import download_or_load
-from pororo.tasks.utils.base import TaskConfig
 
-print("커스텀 OCR 엔진 생성을 시작합니다...")
+IMAGE_PATH = "../resource/강아지 어쩌구 웹툰/1.jpg"
+SAVE_DIR   = "./result"
+LANG       = "ko"
+DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
 
-# --- 2. 설정 정의 ---
-LANG = "ko"  # "ko" 또는 "en"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"사용 언어: {LANG}, 사용 디바이스: {DEVICE}")
 
-# --- 3. 모델 파일 다운로드 (Factory가 하던 일) ---
-# 원본 파일의 PororoOcrFactory.load() 메소드 로직
-print("필요한 모델 파일을 다운로드합니다... (처음 실행 시 시간이 걸림)")
-det_model_path = download_or_load(
-    f"misc/craft.pt",
-    LANG,
-)
-rec_model_path = download_or_load(
-    f"misc/brainocr.pt",
-    LANG,
-)
-opt_fp = download_or_load(
-    f"misc/ocr-opt.txt",
-    LANG,
-)
-print("모델 다운로드 완료.")
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
 
-# --- 4. 핵심 엔진(Reader) 로드 ---
-# brainocr.Reader 객체를 생성합니다. (이것이 실제 모델)
-core_model = brainocr.Reader(
-    LANG,
-    det_model_ckpt_fp=det_model_path,
-    rec_model_ckpt_fp=rec_model_path,
-    opt_fp=opt_fp,
-    device=DEVICE,
-)
-core_model.detector.to(DEVICE)
-core_model.recognizer.to(DEVICE)
+def cut_image_for_text_detection(img):
+    h, w = img.shape[:2]
+    if w > h:
+        return [img], h, w, img
+    cuts = []
+    for i in range(0, h - w // 2, w // 2):
+        if (i + w) < h - 1:
+            part = img[i : i + w, :, :]
+        else:
+            part = img[h - w :, :, :]
+        cuts.append(part)
+    return cuts, h, w, img
 
-# --- 5. 설정(config) 객체 생성 ---
-# PororoOCR 래퍼는 model과 config를 인자로 받습니다.
-# PororoOcrFactory가 하던 것처럼 간단한 Config 객체를 만듭니다.
-# "Available tasks are ['mrc', 'rc', 'qa', 'question_answering', 'machine_reading_comprehension', 'reading_comprehension', 'sentiment', 'sentiment_analysis', 'nli', 'natural_language_inference', 'inference', 'fill', 'fill_in_blank', 'fib', 'para', 'pi', 'cse', 'contextual_subword_embedding', 'similarity', 'sts', 'semantic_textual_similarity', 'sentence_similarity', 'sentvec', 'sentence_embedding', 'sentence_vector', 'se', 'inflection', 'morphological_inflection', 'g2p', 'grapheme_to_phoneme', 'grapheme_to_phoneme_conversion', 'w2v', 'wordvec', 'word2vec', 'word_vector', 'word_embedding', 'tokenize', 'tokenise', 'tokenization', 'tokenisation', 'tok', 'segmentation', 'seg', 'mt', 'machine_translation', 'translation', 'pos', 'tag', 'pos_tagging', 'tagging', 'const', 'constituency', 'constituency_parsing', 'cp', 'pg', 'collocation', 'collocate', 'col', 'word_translation', 'wt', 'summarization', 'summarisation', 'text_summarization', 'text_summarisation', 'summary', 'gec', 'review', 'review_scoring', 'lemmatization', 'lemmatisation', 'lemma', 'ner', 'named_entity_recognition', 'entity_recognition', 'zero-topic', 'dp', 'dep_parse', 'caption', 'captioning', 'asr', 'speech_recognition', 'st', 'speech_translation', 'ocr', 'srl', 'semantic_role_labeling', 'p2g', 'aes', 'essay', 'qg', 'question_generation', 'age_suitability']"
-config = TaskConfig(lang= LANG, n_model= "brainocr", task= "ocr")
+def draw_boxes_on_image(image_path: str, boxes, save_dir: str = "./result") -> str:
+    os.makedirs(save_dir, exist_ok=True)
+    img = cv2.imread(image_path)
+    if img is None:
+        raise FileNotFoundError(f"이미지를 불러올 수 없습니다: {image_path}")
 
-# --- 6. 래퍼(Wrapper) 클래스에 엔진 삽입 ---
-# 드디어 ocr_engine 객체(PororoOCR의 인스턴스)를 생성합니다.
-# PororoOCR(model=핵심엔진, config=설정)
-ocr_engine = PororoOCR(model=core_model, config=config)
+    for bbox in boxes:
+        x1, x2, y1, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 255), 5)
 
-print("OCR 엔진 생성 완료!")
+    base = os.path.basename(image_path)
+    name, ext = os.path.splitext(base)
+    save_path = os.path.join(save_dir, f"{name}_detected{ext}")
+    cv2.imwrite(save_path, img)
+    print(f"결과 이미지 저장됨: {save_path}")
+    return save_path
 
-# --- 7. 실행 테스트 ---
-image_path = "../resource/image1.png"
 
-if os.path.exists(image_path):
-    print(f"\n--- 테스트 실행 ({image_path}) ---")
-    # ocr_engine(image_path)는 내부적으로 ocr_engine.predict(image_path)를 호출합니다.
-    results = ocr_engine(image_path) 
-    pprint.pprint(results)
+def load_pororo_reader(lang: str = LANG, device: str = DEVICE):
+    print("필요한 모델 파일을 다운로드/확인 중...(최초 실행 시 다소 소요)")
+    det_model_path = download_or_load(f"misc/craft.pt", lang)
+    rec_model_path = download_or_load(f"misc/brainocr.pt", lang)
+    print(rec_model_path)
+    opt_fp         = download_or_load(f"misc/ocr-opt.txt", lang)
 
-    print("\n--- 상세 테스트 실행 ---")
-    results_detail = ocr_engine(image_path, detail=True)
-    pprint.pprint(results_detail)
-else:
-    print(f"\n[경고] 테스트 이미지를 찾을 수 없습니다: {image_path}")
-    print("image_path 변수에 실제 이미지 경로를 입력하고 다시 실행하세요.")
+    reader = brainocr.Reader(
+        lang,
+        det_model_ckpt_fp=det_model_path,
+        rec_model_ckpt_fp=rec_model_path,
+        opt_fp=opt_fp,
+        device=device,
+    )
+    reader.detector.to(device)
+    reader.opt2val.update(basic)
+    print(f"Pororo Reader 로드 완료 (lang={lang}, device={device})")
+    return reader
+
+def run_pororo_detection(image_path: str, save_dir: str):
+    ensure_dir(save_dir)
+    img_bgr = cv2.imread(image_path)
+    if img_bgr is None:
+        raise FileNotFoundError(f"이미지를 불러올 수 없습니다: {image_path}")
+    H, W = img_bgr.shape[:2]
+
+    # cuts 생성 (세로 긴 경우 w 높이로 자르고 w//2 오버랩)
+    cuts, h, w, _ = cut_image_for_text_detection(img_bgr)
+    print(f"총 {len(cuts)}개 컷으로 분할됨. (원본 H={H}, W={W})")
+
+    ocr = load_pororo_reader()
+
+    t0 = time.time()
+    all_boxes_global: List[List[int]] = []
+    per_cut_counts = []
+
+    step = w // 2
+    num_cuts = len(cuts)
+
+    for idx, cut_img in enumerate(cuts):
+        if w > h:
+            y0 = 0
+        else:
+            y0 = (h - w) if (idx == num_cuts - 1) else (idx * step)
+
+        horizontal_list, free_list = ocr.detect(cut_img, ocr.opt2val)
+
+        boxes_this_cut = []
+        for b in horizontal_list:
+            # 원본 좌표로 y 오프셋 적용
+            boxes_this_cut.append(b)
+
+        all_boxes_global.extend(boxes_this_cut)
+        per_cut_counts.append(len(boxes_this_cut))
+        print(f"[cut {idx:02d}] y_offset={y0:5d}, 감지 박스={len(boxes_this_cut)}")
+
+    dt = time.time() - t0
+    print(f"\n총 박스 수: {len(all_boxes_global)}")
+    print(f"컷별 평균 박스 수: {np.mean(per_cut_counts) if per_cut_counts else 0:.2f}")
+    print(f"총 소요시간: {dt:.3f} sec  (컷당 {dt/max(1,len(cuts)):.3f} sec)")
+
+    # ✅ 한 번만 호출 → 모든 컷 박스가 원본 이미지에 그려짐
+    save_path = draw_boxes_on_image(image_path, all_boxes_global, save_dir=save_dir)
+
+    # (옵션) 커버리지 리포트
+    areas = [(x2 - x1) * (y2 - y1) for (x1, x2, y1, y2) in all_boxes_global if x2 > x1 and y2 > y1]
+    cover = (sum(areas) / float(H * W)) if H * W > 0 else 0.0
+    print(f"총 박스 면적 합: {sum(areas)}  |  이미지 면적 대비 커버리지: {cover*100:.2f}%")
+
+    return all_boxes_global, save_path
+
+
+
+if __name__ == "__main__":
+    if not os.path.exists(IMAGE_PATH):
+        raise FileNotFoundError(f"이미지 파일이 존재하지 않습니다: {IMAGE_PATH}")
+    run_pororo_detection(IMAGE_PATH, SAVE_DIR)

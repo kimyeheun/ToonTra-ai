@@ -3,18 +3,24 @@ from typing import List, Tuple
 import numpy as np
 from paddleocr import PaddleOCR
 
-from text_extract.data import Box
-from utils.ocr_util import clamp_box
 
+def run_ocr_on_crops(img_bgr: np.ndarray, boxes: List[List], ocr_model: str) -> List[Tuple[List, str]]:
+    # print("[run_ocr_on_crops]]")
+    # print(boxes)
 
-def run_ocr_on_crops(img_bgr: np.ndarray, boxes: List[Box], ocr_model: str) -> List[Tuple[Box, str]]:
     H, W = img_bgr.shape[:2]
     out = []
-    for b in boxes:
-        b = clamp_box(b, W, H)
-        crop = img_bgr[b.y:b.y+b.h, b.x:b.x+b.w]
+    # for cluster in :
+    for text_box in boxes:
+        x, y, w, h = text_box
+        x = max(0, min(x, W - 1))
+        y = max(0, min(y, H - 1))
+        w = max(1, min(w, W - x))
+        h = max(1, min(h, H - y))
+        crop = img_bgr[y:y+h, x:x+w]
+
         if crop.size == 0:
-            out.append((b, "[empty_crop_skipped]"))
+            out.append((text_box, "[empty_crop_skipped]"))
             continue
         # NOTE: 모델 결정
         if ocr_model=="tesseract":
@@ -27,7 +33,7 @@ def run_ocr_on_crops(img_bgr: np.ndarray, boxes: List[Box], ocr_model: str) -> L
             text = ocr_pororo(crop)
         else:
             text = ""
-        out.append((b, text if text else "[empty_text]"))
+        out.append((text_box, text if text else "[empty_text]"))
     return out
 
 def ocr_pytesseract(img_bgr: np.ndarray) -> str:

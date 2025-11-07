@@ -1,3 +1,8 @@
 flash_attn-2.8.3+cu128torch2.8.0cxx11abiFALSE-cp310-cp310-win_amd64.whl
 .idea
 __pycache__/
+weights/
+resource/
+ocr_service/weights/
+ocr_service/result/
+ocr_service/ocr_det/

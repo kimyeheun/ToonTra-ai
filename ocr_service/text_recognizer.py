@@ -24,33 +24,78 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 from PIL import Image
 from torch.utils.data import Dataset
-
-from ocr_service.utils.korean_class import korean_classes
+import math
+from ocr_service.utils.korean_class import korean_classes #, korean_pororo_classes
 from ocr_service.utils.util import array2d_to_array1d, array1d_to_array2d
 
 
 class TextRecognizer:
-    def __init__(self, opt):
+    def __init__(self, opt, model_type):
         self.opt = opt
         self.converter = CTCLabelConverter(korean_classes)
         self.opt.num_class = len(self.converter.character)
-        model = Model(self.opt)
-        model = torch.nn.DataParallel(model).to(self.opt.device)
-        model.load_state_dict(
-            torch.load(self.opt.saved_model, map_location=self.opt.device)
-        )
-        model.eval()
-        self.model = model
+
+        # model = Model(self.opt)
+        # model.load_state_dict(torch.load(self.opt.saved_model, map_location=self.opt.device))
+        # model = torch.nn.DataParallel(model).to(self.opt.device)
+        # model.eval()
+
+        self.model = self._set_model()
+        self.model.eval()
         self.alignCollate = AlignCollate(
             imgH=self.opt.imgH, imgW=self.opt.imgW, keep_ratio_with_pad=self.opt.PAD
         )
 
+
+    def _set_model(self):
+        model = Model(self.opt)
+        model = model.to(self.opt.device)
+
+        checkpoint = torch.load(self.opt.saved_model, map_location=self.opt.device)
+        checkpoint = {k.replace('module.', ''): v for k, v in checkpoint.items()}
+
+        compatible_checkpoint = {}
+        for k, v in checkpoint.items():
+            if k in model.state_dict():
+                compatible_checkpoint[k] = v
+            else:
+                compatible_checkpoint[k] = v
+
+        model_state = model.state_dict()
+        missing_keys = []
+        unexpected_keys = []
+
+        for k in model_state.keys():
+            if k not in compatible_checkpoint:
+                missing_keys.append(k)
+
+        for k in compatible_checkpoint.keys():
+            if k not in model_state:
+                unexpected_keys.append(k)
+
+        if missing_keys:
+            print(f"Missing keys in checkpoint: {missing_keys}")
+        if unexpected_keys:
+            print(f"Unexpected keys in checkpoint: {unexpected_keys}")
+
+        model.load_state_dict(compatible_checkpoint, strict=False)
+        model = torch.nn.DataParallel(model).to(self.opt.device)
+        return model
+
     def extract_text(self, list_of_pil_images):
-        list_of_pil_images, list_of_pil_images_shape = array2d_to_array1d(
-            list_of_pil_images
-        )
+        if isinstance(list_of_pil_images, Image.Image):
+            list_of_pil_images = [[list_of_pil_images]]
+        elif (list_of_pil_images
+              and isinstance(list_of_pil_images, list)
+              and isinstance(list_of_pil_images[0], Image.Image)):
+            list_of_pil_images = [list_of_pil_images]
+
+        list_of_pil_images, list_of_pil_images_shape = array2d_to_array1d(list_of_pil_images)
         output_strings_original = []
         for pil_images in list_of_pil_images:
+            if isinstance(pil_images, Image.Image):
+                pil_images = [pil_images]
+
             demo_data = RawDataset(pil_images=pil_images, opt=self.opt)
             demo_loader = torch.utils.data.DataLoader(
                 demo_data,
@@ -116,7 +161,7 @@ class TextRecognizer:
             print(
                 "Currently '{}' language is not supported.".format(source_lang.lower())
             )
-            source_lang = LANGUAGES[target_language.lower().capitalize()]
+            source_lang = LANGUAGES[source_lang.lower().capitalize()]
         reader = easyocr.Reader([source_lang], gpu=True)
 
         list_of_pil_images, list_of_pil_images_shape = array2d_to_array1d(
@@ -346,7 +391,15 @@ class Model(nn.Module):
             print("No Transformation module specified")
 
         """ FeatureExtraction """
-        if opt.FeatureExtraction == "ResNet":
+        if opt.FeatureExtraction == "VGG":
+            opt2val = {"rec_model_ckpt_fp": "baseline"}  # 기본값 설정
+
+            self.FeatureExtraction = VGGFeatureExtractor(
+            n_input_channels=opt.input_channel,
+            n_output_channels=opt.output_channel,
+            opt2val=opt2val
+        )
+        elif opt.FeatureExtraction == "ResNet":
             self.FeatureExtraction = ResNet_FeatureExtractor(
                 opt.input_channel, opt.output_channel
             )
@@ -609,6 +662,106 @@ class GridGenerator(nn.Module):
         )  # batch_size x F+3 x 2
         batch_P_prime = torch.bmm(batch_P_hat, batch_T)  # batch_size x n x 2
         return batch_P_prime  # batch_size x n x 2
+
+class VGGFeatureExtractor(nn.Module):
+    """ FeatureExtractor of CRNN (https://arxiv.org/pdf/1507.05717.pdf) """
+
+    def __init__(self,
+                 n_input_channels: int = 1,
+                 n_output_channels: int = 512,
+                 opt2val=None):
+        super(VGGFeatureExtractor, self).__init__()
+
+        self.output_channel = [
+            int(n_output_channels / 8),
+            int(n_output_channels / 4),
+            int(n_output_channels / 2),
+            n_output_channels,
+        ]  # [64, 128, 256, 512]
+
+        rec_model_ckpt_fp = opt2val["rec_model_ckpt_fp"]
+        if "baseline" in rec_model_ckpt_fp:
+            self.ConvNet = nn.Sequential(
+                nn.Conv2d(n_input_channels, self.output_channel[0], 3, 1, 1),
+                nn.ReLU(True),
+                nn.MaxPool2d(2, 2),  # 64x16x50
+                nn.Conv2d(self.output_channel[0], self.output_channel[1], 3, 1,
+                          1),
+                nn.ReLU(True),
+                nn.MaxPool2d(2, 2),  # 128x8x25
+                nn.Conv2d(self.output_channel[1], self.output_channel[2], 3, 1,
+                          1),
+                nn.ReLU(True),  # 256x8x25
+                nn.Conv2d(self.output_channel[2], self.output_channel[2], 3, 1,
+                          1),
+                nn.ReLU(True),
+                nn.MaxPool2d((2, 1), (2, 1)),  # 256x4x25
+                nn.Conv2d(self.output_channel[2],
+                          self.output_channel[3],
+                          3,
+                          1,
+                          1,
+                          bias=False),
+                nn.BatchNorm2d(self.output_channel[3]),
+                nn.ReLU(True),  # 512x4x25
+                nn.Conv2d(self.output_channel[3],
+                          self.output_channel[3],
+                          3,
+                          1,
+                          1,
+                          bias=False),
+                nn.BatchNorm2d(self.output_channel[3]),
+                nn.ReLU(True),
+                nn.MaxPool2d((2, 1), (2, 1)),  # 512x2x25
+                # nn.Conv2d(self.output_channel[3], self.output_channel[3], 2, 1, 0), nn.ReLU(True))  # 512x1x24
+                nn.ConvTranspose2d(self.output_channel[3],
+                                   self.output_channel[3], 2, 2),
+                nn.ReLU(True),
+            )  # 512x4x50
+        else:
+            self.ConvNet = nn.Sequential(
+                nn.Conv2d(n_input_channels, self.output_channel[0], 3, 1, 1),
+                nn.ReLU(True),
+                nn.MaxPool2d(2, 2),  # 64x16x50
+                nn.Conv2d(self.output_channel[0], self.output_channel[1], 3, 1,
+                          1),
+                nn.ReLU(True),
+                nn.MaxPool2d(2, 2),  # 128x8x25
+                nn.Conv2d(self.output_channel[1], self.output_channel[2], 3, 1,
+                          1),
+                nn.ReLU(True),  # 256x8x25
+                nn.Conv2d(self.output_channel[2], self.output_channel[2], 3, 1,
+                          1),
+                nn.ReLU(True),
+                nn.MaxPool2d((2, 1), (2, 1)),  # 256x4x25
+                nn.Conv2d(self.output_channel[2],
+                          self.output_channel[3],
+                          3,
+                          1,
+                          1,
+                          bias=False),
+                nn.BatchNorm2d(self.output_channel[3]),
+                nn.ReLU(True),  # 512x4x25
+                nn.Conv2d(self.output_channel[3],
+                          self.output_channel[3],
+                          3,
+                          1,
+                          1,
+                          bias=False),
+                nn.BatchNorm2d(self.output_channel[3]),
+                nn.ReLU(True),
+                nn.MaxPool2d((2, 1), (2, 1)),  # 512x2x25
+                # nn.Conv2d(self.output_channel[3], self.output_channel[3], 2, 1, 0), nn.ReLU(True))  # 512x1x24
+                nn.ConvTranspose2d(self.output_channel[3],
+                                   self.output_channel[3], 2, 2),
+                nn.ReLU(True),  # 512x4x50
+                nn.ConvTranspose2d(self.output_channel[3],
+                                   self.output_channel[3], 2, 2),
+                nn.ReLU(True),
+            )  # 512x4x50
+
+    def forward(self, x):
+        return self.ConvNet(x)
 
 
 class ResNet_FeatureExtractor(nn.Module):
